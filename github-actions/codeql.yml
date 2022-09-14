@@ -1,0 +1,158 @@
+name: "CodeQL Scan"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [ main ]
+  schedule:
+    - cron: '43 12 * * 4' # Do we want to run this on a daily, weekly, or monthly basis?
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'python' ]
+        # CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby' ]
+        # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set Up AWS CLI Access # Json Web Token (JWT) and OpenID configuration in AWS Navify as IdP 
+      run: |
+        export AWS_ROLE_ARN=${{ secrets.AWS_ROLE_ARN }}
+        export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/awscreds
+        export AWS_DEFAULT_REGION=us-west-1
+        echo AWS_WEB_IDENTITY_TOKEN_FILE=$AWS_WEB_IDENTITY_TOKEN_FILE >> $GITHUB_ENV
+        echo AWS_ROLE_ARN=$AWS_ROLE_ARN >> $GITHUB_ENV
+        echo AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION >> $GITHUB_ENV
+        curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r '.value' > $AWS_WEB_IDENTITY_TOKEN_FILE
+      # Start building the environment to run Python scripts
+    - name: Prepare Python Environment
+      uses: actions/setup-python@v3
+      with:
+        python-version: 3.8 #Explicitly call the Python version
+
+      # Install pip module used to upload to DefectDojo
+    - name: Install Pip Dependencies
+      run: pip install requests    
+
+    # Initializes the CodeQL tools for scanning.
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: ${{ matrix.language }}
+        # If you wish to specify custom queries, you can do so here or in a config file.
+        # By default, queries listed here will override any specified in a config file.
+        # Prefix the list here with "+" to use these queries and those in the config file.
+        
+        # Details on CodeQL's query packs refer to : https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
+        # queries: security-extended,security-and-quality
+
+        
+    # Autobuild attempts to build any compiled languages  (C/C++, C#, or Java).
+    # If this step fails, then you should remove it and run the build manually (see below)
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v2
+
+    # ℹ️ Command-line programs to run using the OS shell.
+    # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
+
+    #   If the Autobuild fails above, remove it and uncomment the following three lines. 
+    #   modify them (or add more) to build your code if your project, please refer to the EXAMPLE below for guidance.
+
+    # - run: |
+    #   echo "Run, Build Application using script"
+    #   ./location_of_script_within_repo/buildscript.sh
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+      with:
+        add-snippets: true
+        
+      # Do the worky worky to get scans into DefectDojo
+    - name: Get Runner Public IP
+      id: ip
+      uses: haythem/public-ip@v1.2
+
+    - name: Open Runner IP in AWS
+      run: |
+        aws ec2 authorize-security-group-ingress \
+          --group-id ${{ secrets.AWS_SG_ID }} \
+          --protocol tcp \
+          --port 443 \
+          --cidr ${{ steps.ip.outputs.ipv4 }}/32
+      
+    - name: Upload Results to DefectDojo
+      uses: jannekem/run-python-script-action@v1
+      env:
+        DEFECTDOJO_HOST: ${{ secrets.DEFECTDOJO_HOST }}
+        DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+      with:
+        script: |
+          from datetime import datetime
+          import json
+          import os
+          import requests
+          # Variable block <CHANGE THESE>
+          host = os.environ['DEFECTDOJO_HOST']
+          api_key = os.environ['DEFECTDOJO_API_KEY']
+          tags = "GithubEnterprise"
+          product_id = 4
+          result_file = "../results/python.sarif"
+          scanner = "SARIF"
+          engagement_id = 4
+          def upload_results(host, api_key, scanner, result_file, engagement_id, verify=True): # set verify to False if ssl cert is self-signed
+            # Variable block <CHANGE THESE>
+            API_URL = "https://" + host +"/api/v2"
+            IMPORT_SCAN_URL = API_URL + "/reimport-scan/"
+            AUTH_TOKEN = "Token " + api_key
+            print(str(IMPORT_SCAN_URL))
+            print (str(result_file))
+            headers = dict()
+            json = dict()
+            files = dict()
+            # Prepare API headers
+            headers['Authorization'] = AUTH_TOKEN
+            print(headers)
+            json["minimum_severity"] = "Low"
+            json["scan_date"] = datetime.now().strftime("%Y-%m-%d")
+            json["verified"] = False
+            json["tags"] = tags
+            json["active"] = False
+            json["engagement"] = engagement_id
+            json["lead"] = "1"
+            json["scan_type"] = scanner
+            print(json)
+            # Prepare file data to send to API
+            files["file"] = open(result_file)
+            # Make a request to API
+            response = requests.post(IMPORT_SCAN_URL, headers=headers, files=files, data=json, verify=verify)
+            return response.status_code
+          # upload_results(self, host, api_key, scanner, result_file, engagement_id, verify=False): # set verify to False if ssl cert is self-signed
+          result = upload_results(host, api_key, scanner, result_file, engagement_id)
+          # Error Handling
+          if result == 201 :
+            print("Successfully uploaded the results to Defect Dojo")
+          else:
+            print("Something went wrong, please debug " + str(result))
+            
+    - name: Close Runner IP in AWS
+      if: always() # Always remove the IP, even if the upload fails.
+      run: |
+        aws ec2 revoke-security-group-ingress \
+          --group-id ${{ secrets.AWS_SG_ID }} \
+          --protocol tcp \
+          --port 443 \
+          --cidr ${{ steps.ip.outputs.ipv4 }}/32

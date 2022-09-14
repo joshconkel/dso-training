@@ -1,0 +1,179 @@
+# Error Handling and STDERR output
+name: Extract GHE Results - Upload to DefectDojo
+# When to execute the code - main branch changes
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    
+# Main job for GH Action
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Set Up AWS CLI Access #Json Web Token (JWT) and OpenID configuration in AWS Navify as IdP 
+        run: |
+          export AWS_ROLE_ARN=${{ secrets.AWS_ROLE_ARN }}
+          export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/awscreds
+          export AWS_DEFAULT_REGION=us-west-1
+          echo AWS_WEB_IDENTITY_TOKEN_FILE=$AWS_WEB_IDENTITY_TOKEN_FILE >> $GITHUB_ENV
+          echo AWS_ROLE_ARN=$AWS_ROLE_ARN >> $GITHUB_ENV
+          echo AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION >> $GITHUB_ENV
+          curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r '.value' > $AWS_WEB_IDENTITY_TOKEN_FILE
+        # Start building the environment to run Python scripts
+      - name: Prepare Python Environment
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3.8 #Explicitly call the Python version
+
+        # Install pip module used to upload to DefectDojo
+      - name: Install Pip Dependencies
+        run: pip install requests    
+
+      - name: Run Github Vulnerability Report # GraphQL and Python
+        uses: jannekem/run-python-script-action@v1          
+        env:
+          GIT_GRAPHQL_TOKEN: ${{ secrets.GIT_GRAPHQL_TOKEN }}
+          GIT_GRAPHQL_NAME: ${{ secrets.GIT_GRAPHQL_NAME }}
+          GIT_GRAPHQL_OWNER: ${{ secrets.GIT_GRAPHQL_OWNER }}
+        with:
+          script: |
+            import sys
+            import json
+            import requests
+            query = """
+            query getVulnerabilitiesByRepoAndOwner($name: String!, $owner: String!) {
+              repository(name: $name, owner: $owner) {
+                vulnerabilityAlerts(first: 100) {
+                  nodes {
+                    id
+                    createdAt
+                    securityVulnerability {
+                      severity
+                      package {
+                        name
+                        ecosystem
+                      }
+                      advisory {
+                        description
+                        summary
+                        identifiers {
+                          value
+                          type
+                        }
+                        references {
+                          url
+                        }
+                        cvss {
+                          vectorString
+                        }
+                      }
+                    }
+                    vulnerableManifestPath
+                  }
+                }
+              }
+            }
+            """
+            token = os.environ['GIT_GRAPHQL_TOKEN'] # generated from GitHub settings
+            headers = {"Authorization": "Bearer " + token}
+            request = requests.post(url='https://api.github.com/graphql',
+                                    json={
+                                      "operationName": "getVulnerabilitiesByRepoAndOwner",
+                                      'query': query,
+                                      'variables': {
+                                        # Defined in GitHub, Name is repo, Owner is project 
+                                        'name': os.environ['GIT_GRAPHQL_NAME'],
+                                        'owner': os.environ['GIT_GRAPHQL_OWNER']
+                                      }
+                                    },
+                                    headers=headers)
+            result = request.json()
+            #print(json.dumps(result, indent=2))
+            original_stdout = sys.stdout
+            # Output results to a file in the pwd (current working directory)
+            with open('GitEnterpriseRpt.json', 'w') as GHReport:
+              sys.stdout = GHReport # Change the standard output to the file we created.
+              print(json.dumps(result, indent=2))
+              sys.stdout = original_stdout # Reset STDOUT
+              
+      - name: GitHub Enterprise Vulnerability Test Results (JSON)
+        run: cat GitEnterpriseRpt.json
+
+      - name: Get Runner Public IP
+        id: ip
+        uses: haythem/public-ip@v1.2
+
+      - name: Open Runner IP in AWS
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ secrets.AWS_SG_ID }} \
+            --protocol tcp \
+            --port 443 \
+            --cidr ${{ steps.ip.outputs.ipv4 }}/32
+        
+      - name: Upload Results to DefectDojo
+        uses: jannekem/run-python-script-action@v1
+        env:
+          DEFECTDOJO_HOST: ${{ secrets.DEFECTDOJO_HOST }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        with:
+          script: |
+            from datetime import datetime
+            import json
+            import os
+            import requests
+            # Variable block <CHANGE THESE>
+            host = os.environ['DEFECTDOJO_HOST']
+            api_key = os.environ['DEFECTDOJO_API_KEY']
+            tags = "GithubEnterprise"
+            product_id = 4
+            result_file = "GitEnterpriseRpt.json"
+            scanner = "Github Vulnerability Scan"
+            engagement_id = 4
+            def upload_results(host, api_key, scanner, result_file, engagement_id, verify=True): # set verify to False if ssl cert is self-signed
+              # Variable block <CHANGE THESE>
+              API_URL = "https://" + host +"/api/v2"
+              IMPORT_SCAN_URL = API_URL + "/reimport-scan/"
+              AUTH_TOKEN = "Token " + api_key
+              print(str(IMPORT_SCAN_URL))
+              print (str(result_file))
+              headers = dict()
+              json = dict()
+              files = dict()
+              # Prepare API headers
+              headers['Authorization'] = AUTH_TOKEN
+              print(headers)
+              json["minimum_severity"] = "Low"
+              json["scan_date"] = datetime.now().strftime("%Y-%m-%d")
+              json["verified"] = False
+              json["tags"] = tags
+              json["active"] = False
+              json["engagement"] = engagement_id
+              json["lead"] = "1"
+              json["scan_type"] = scanner
+              print(json)
+              # Prepare file data to send to API
+              files["file"] = open(result_file)
+              # Make a request to API
+              response = requests.post(IMPORT_SCAN_URL, headers=headers, files=files, data=json, verify=verify)
+              return response.status_code
+            # upload_results(self, host, api_key, scanner, result_file, engagement_id, verify=False): # set verify to False if ssl cert is self-signed
+            result = upload_results(host, api_key, scanner, result_file, engagement_id)
+            # Error Handling
+            if result == 201 :
+              print("Successfully uploaded the results to Defect Dojo")
+            else:
+              print("Something went wrong, please debug " + str(result))
+      - name: Close Runner IP in AWS
+        if: always() # Always remove the IP, even if the upload fails.
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ secrets.AWS_SG_ID }} \
+            --protocol tcp \
+            --port 443 \
+            --cidr ${{ steps.ip.outputs.ipv4 }}/32

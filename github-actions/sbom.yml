@@ -1,0 +1,34 @@
+name: Build SBOM with Syft
+# When to execute the code - main branch changes
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Main job for GH Action
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Can't scan the code if it's not there, get it.
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      # First we generate the SBOM in the proper format
+      - name: Generate SBOM From Code
+        uses: anchore/sbom-action@v0
+        with:
+          # path: ./app/
+          format: cyclone-dx
+          output-file: sbom-flask-cyclonedx.xml
+          artifact-name: sbom-flask-cyclonedx.xml
+
+      # Then we upload the SBOM to DependencyTrack
+      #
+      - name: Upload SBOM to DependencyTrack
+        run: |
+          curl -X "POST" "${{ secrets.DEPTRACK_HOST }}" \
+            -H "Content-Type: multipart/form-data" \
+            -H "X-API-Key: ${{ secrets.DEPTRACK_KEY }}" \
+            -F "project=d418843b-e206-4f5d-a6c7-33095e312531" \
+            -F "bom=@sbom-flask-cyclonedx.xml"
