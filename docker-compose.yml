@@ -1,0 +1,123 @@
+# This docker-compose.yml file  is fully functional to deploy DefectDojo
+# in a local docker host environment.
+#
+# TODO
+#
+# Need to manually update site URL in DD_SITE_URL prior to deployment.
+# We may be able to make multiple compose files for different environments based on naming later.
+---
+version: '3.7'
+services:
+  nginx:
+    build:
+      context: ./
+      dockerfile: Dockerfile.nginx
+    image: "defectdojo/defectdojo-nginx:${NGINX_VERSION:-latest}"
+    depends_on:
+      - uwsgi
+    environment:
+      NGINX_METRICS_ENABLED: "${NGINX_METRICS_ENABLED:-false}"
+    volumes:
+      - defectdojo_media:/usr/share/nginx/html/media
+    ports:
+      - target: 8080
+        published: ${DD_PORT:-8080}
+        protocol: tcp
+        mode: host
+  uwsgi:
+    build:
+      context: ./
+      dockerfile: Dockerfile.django
+      target: django
+    image: "defectdojo/defectdojo-django:${DJANGO_VERSION:-latest}"
+    entrypoint: ['/wait-for-it.sh', 'mysql:3306', '-t', '30', '--', '/entrypoint-uwsgi.sh']
+    environment:
+      DD_DEBUG: 'False'
+      DD_SITE_URL: "https://defectdojo.slalomsf-lab.com"
+      DD_DJANGO_METRICS_ENABLED: "${DD_DJANGO_METRICS_ENABLED:-False}"
+      DD_ALLOWED_HOSTS: "${DD_ALLOWED_HOSTS:-*}"
+      DD_DATABASE_URL: "${DD_DATABASE_URL:-mysql://defectdojo:defectdojo@mysql:3306/defectdojo}"
+      DD_CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      DD_CELERY_BROKER_USER: "${DD_CELERY_BROKER_USER:-guest}"
+      DD_CELERY_BROKER_PASSWORD: "${DD_CELERY_BROKER_USER:-guest}"
+      DD_SECRET_KEY: "${DD_SECRET_KEY:-hhZCp@D28z!n@NED*yB!ROMt+WzsY*iq}"
+      DD_CREDENTIAL_AES_256_KEY: "${DD_CREDENTIAL_AES_256_KEY:-&91a*agLqesc*0DJ+2*bAbsUZfR*4nLw}"
+      # SAML Configuration
+      DD_SAML2_ENABLED: "True"
+      DD_SAML2_FORCE_AUTH: "False"
+      DD_SAML2_LOGIN_BUTTON_TEXT: "Login with Slalom Account"
+      DD_SAML2_METADATA_AUTO_CONF_URL: "http://defectdojo-idpXXXXXXX.s3-website-us-west-1.amazonaws.com/Idp_XXXXXX_metadata_DefectDojo.xml"
+      DD_SAML2_METADATA_LOCAL_FILE_PATH: ""
+      DD_SAML2_ENTITY_ID: "dev.defectdfp-demo.platform.navify.com"
+      DD_SAML2_CREATE_USER: "True"
+      # DD_SAML2_ATTRIBUTES_MAP: "'email'='email','username'='username','first_name'='first_name','last_name'='last_name'"
+      DD_SAML2_ALLOW_UNKNOWN_ATTRIBUTE: "True"
+      # Email configuration (Amazon SES)
+      DD_EMAIL_URL: "smtp+tls://AKIA4KJ7SDD4M4ZERTWJ:BJzUEGU1HBLcDvf%2fLAbDbGx7ZHzWbGmv6o1pDmZoa0Tf@email-smtp.us-west-1.amazonaws.com:587"
+
+    volumes:
+        - type: bind
+          source: ./docker/extra_settings
+          target: /app/docker/extra_settings
+        - "defectdojo_media:${DD_MEDIA_ROOT:-/app/media}"
+  celerybeat:
+    image: "defectdojo/defectdojo-django:${DJANGO_VERSION:-latest}"
+    depends_on:
+      - rabbitmq
+    entrypoint: ['/wait-for-it.sh', 'mysql:3306', '-t', '30', '--', '/entrypoint-celery-beat.sh']
+    environment:
+      DD_SITE_URL: "https://defectdojo.slalomsf-lab.com"
+      DD_DATABASE_URL: "${DD_DATABASE_URL:-mysql://defectdojo:defectdojo@mysql:3306/defectdojo}"
+      DD_CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      DD_CELERY_BROKER_USER: "${DD_CELERY_BROKER_USER:-guest}"
+      DD_CELERY_BROKER_PASSWORD: "${DD_CELERY_BROKER_USER:-guest}"
+      DD_SECRET_KEY: "${DD_SECRET_KEY:-hhZCp@D28z!n@NED*yB!ROMt+WzsY*iq}"
+      DD_CREDENTIAL_AES_256_KEY: "${DD_CREDENTIAL_AES_256_KEY:-&91a*agLqesc*0DJ+2*bAbsUZfR*4nLw}"
+    volumes:
+        - type: bind
+          source: ./docker/extra_settings
+          target: /app/docker/extra_settings
+  celeryworker:
+    image: "defectdojo/defectdojo-django:${DJANGO_VERSION:-latest}"
+    depends_on:
+      - rabbitmq
+    entrypoint: ['/wait-for-it.sh', 'mysql:3306', '-t', '30', '--', '/entrypoint-celery-worker.sh']
+    environment:
+      DD_SITE_URL: "https://defectdojo.slalomsf-lab.com"
+      DD_DATABASE_URL: "${DD_DATABASE_URL:-mysql://defectdojo:defectdojo@mysql:3306/defectdojo}"
+      DD_CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      DD_CELERY_BROKER_USER: "${DD_CELERY_BROKER_USER:-guest}"
+      DD_CELERY_BROKER_PASSWORD: "${DD_CELERY_BROKER_USER:-guest}"
+      DD_SECRET_KEY: "${DD_SECRET_KEY:-hhZCp@D28z!n@NED*yB!ROMt+WzsY*iq}"
+      DD_CREDENTIAL_AES_256_KEY: "${DD_CREDENTIAL_AES_256_KEY:-&91a*agLqesc*0DJ+2*bAbsUZfR*4nLw}"
+    volumes:
+        - type: bind
+          source: ./docker/extra_settings
+          target: /app/docker/extra_settings
+        - "defectdojo_media:${DD_MEDIA_ROOT:-/app/media}"
+  initializer:
+    image: "defectdojo/defectdojo-django:${DJANGO_VERSION:-latest}"
+    entrypoint: ['/wait-for-it.sh', 'mysql:3306', '--', '/entrypoint-initializer.sh']
+    environment:
+      DD_SITE_URL: "https://defectdojo.slalomsf-lab.com"
+      DD_DATABASE_URL: "${DD_DATABASE_URL:-mysql://defectdojo:defectdojo@mysql:3306/defectdojo}"
+      DD_CELERY_BROKER_URL: "amqp://guest:guest@rabbitmq:5672//"
+      DD_ADMIN_USER: "${DD_ADMIN_USER:-admin}"
+      DD_ADMIN_MAIL: "${DD_ADMIN_USER:-admin@defectdojo.local}"
+      DD_ADMIN_FIRST_NAME: "${DD_ADMIN_FIRST_NAME:-Admin}"
+      DD_ADMIN_LAST_NAME: "${DD_ADMIN_LAST_NAME:-User}"
+      DD_INITIALIZE: "${DD_INITIALIZE:-true}"
+      DD_SECRET_KEY: "${DD_SECRET_KEY:-hhZCp@D28z!n@NED*yB!ROMt+WzsY*iq}"
+      DD_CREDENTIAL_AES_256_KEY: "${DD_CREDENTIAL_AES_256_KEY:-&91a*agLqesc*0DJ+2*bAbsUZfR*4nLw}"
+    volumes:
+        - type: bind
+          source: ./docker/extra_settings
+          target: /app/docker/extra_settings
+  rabbitmq:
+    image: rabbitmq:3.9.11@sha256:20d5aeaad748b0a639b08fe54a8d4d311abe14d4ff1aa0d2ecfb6fbdf76cb155
+    volumes:
+       - defectdojo_rabbitmq:/var/lib/rabbitmq
+volumes:
+  defectdojo_data: {}
+  defectdojo_media: {}
+  defectdojo_rabbitmq: {}
